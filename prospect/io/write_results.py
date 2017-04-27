@@ -89,11 +89,11 @@ def write_pickles(run_params, model, obs, sampler, powell_results,
 
     results['prospector_version'] = bgh
     results['paramfile_text'] = paramfile_string(**run_params)
-    
+
     if outroot is None:
         tt = int(time.time())
         outroot = '{1}_{0}'.format(tt, run_params['outfile'])
-    
+
     write_model_pickle(outroot + '_model', model, bgh=bgh, powell=powell_results,
                        paramfile_text=results['paramfile_text'])
     with open(outroot + '_mcmc', "wb") as out:
@@ -123,12 +123,12 @@ def paramfile_string(param_file=None, **extras):
         pass
     return pstr
 
-        
+
 def write_hdf5(hfile, run_params, model, obs, sampler, powell_results,
                tsample=0.0, toptimize=0.0, sampling_initial_center=[],
                **extras):
     """Write output and information to an HDF5 file object (or
-    group).  
+    group).
     """
     try:
         # If ``hfile`` is not a file object, assume it is a filename and open
@@ -142,19 +142,12 @@ def write_hdf5(hfile, run_params, model, obs, sampler, powell_results,
     # ----------------------
     # Sampling info
     try:
-        sdat = hf['sampling']
-    except(KeyError):
-        sdat = hf.create_group('sampling')
-        sdat.create_dataset('chain', data=sampler.chain)
-        sdat.create_dataset('lnprobability', data=sampler.lnprobability)
-    sdat.create_dataset('acceptance', data=sampler.acceptance_fraction)
-    sdat.create_dataset('sampling_initial_center', data=sampling_initial_center)
-    sdat.create_dataset('initial_theta', data=model.initial_theta.copy())
-    # JSON Attrs    
-    sdat.attrs['rstate'] = pickle.dumps(sampler.random_state)
-    sdat.attrs['sampling_duration'] = json.dumps(tsample)
-    sdat.attrs['theta_labels'] = json.dumps(list(model.theta_labels()))
-    hf.flush()
+        # emcee
+        a = sampler.acceptance_fraction
+        write_emcee_h5(hf, sampler, model, sampling_initial_center, tsample)
+    except(AttributeError):
+        # nestle
+        write_nestle_h5(hf, sampler, model)
 
     # ----------------------
     # High level parameter and version info
@@ -165,7 +158,7 @@ def write_hdf5(hfile, run_params, model, obs, sampler, powell_results,
     # ----------------------
     # Observational data
     write_obs_to_h5(hf, obs)
-    
+
     # Store the githash last after flushing since getting it might cause an
     # uncatchable crash
     bgh = githash(**run_params)
@@ -177,6 +170,51 @@ def write_hdf5(hfile, run_params, model, obs, sampler, powell_results,
     #write_model_pickle(outroot + '_model', model, bgh=bgh, powell=powell_results)
 
 
+def write_emcee_h5(hf, sampler, model, sampling_initial_center, tsample):
+    """Write emcee information to the provided HDF5 file in the `sampling`
+    group.
+    """
+    try:
+        sdat = hf['sampling']
+    except(KeyError):
+        sdat = hf.create_group('sampling')
+    if 'chain' not in sdat:
+        sdat.create_dataset('chain', data=sampler.chain)
+        sdat.create_dataset('lnprobability', data=sampler.lnprobability)
+    sdat.create_dataset('acceptance', data=sampler.acceptance_fraction)
+    sdat.create_dataset('sampling_initial_center', data=sampling_initial_center)
+    sdat.create_dataset('initial_theta', data=model.initial_theta.copy())
+    # JSON Attrs
+    sdat.attrs['rstate'] = pickle.dumps(sampler.random_state)
+    sdat.attrs['sampling_duration'] = json.dumps(tsample)
+    sdat.attrs['theta_labels'] = json.dumps(list(model.theta_labels()))
+
+    hf.flush()
+
+
+def write_nestle_h5(hf, nestle_out, model):
+    """Write nestle results to the provided HDF5 file in the `sampling` group.
+    """
+    try:
+        sdat = hf['sampling']
+    except(KeyError):
+        sdat = hf.create_group('sampling')
+    sdat.create_dataset('chain', data=nestle_out['samples'])
+    sdat.create_dataset('weights', data=nestle_out['weights'])
+    sdat.create_dataset('lnprobability', data=nestle_out['logl'])
+    sdat.create_dataset('logvol', data=nestle_out['logvol'])
+    sdat.create_dataset('logz', data=np.atleast_1d(nestle_out['logz']))
+    sdat.create_dataset('logzerr', data=np.atleast_1d(nestle_out['logzerr']))
+    sdat.create_dataset('h_information', data=np.atleast_1d(nestle_out['h']))
+
+    # JSON Attrs
+    for p in ['niter', 'ncall']:
+        sdat.attrs[p] = json.dumps(nestle_out[p])
+    sdat.attrs['theta_labels'] = json.dumps(list(model.theta_labels()))
+
+    hf.flush()
+
+
 def write_h5_header(hf, run_params, model):
     """Write header information about the run.
     """
@@ -185,7 +223,7 @@ def write_h5_header(hf, run_params, model):
                  'paramfile_text': paramfile_string(**run_params)}
     for k, v in list(serialize.items()):
         try:
-            hf.attrs[k] = json.dumps(v) #, cls=NumpyEncoder)
+            hf.attrs[k] = json.dumps(v)  #, cls=NumpyEncoder)
         except(TypeError):
             # Should this fall back to pickle.dumps?
             hf.attrs[k] = pickle.dumps(v)
@@ -214,7 +252,7 @@ def write_obs_to_h5(hf, obs):
             odat.create_dataset(k, data=v)
         else:
             try:
-                odat.attrs[k] = json.dumps(v)#, cls=NumpyEncoder)
+                odat.attrs[k] = json.dumps(v)  #, cls=NumpyEncoder)
             except(TypeError):
                 # Should this fall back to pickle.dumps?
                 odat.attrs[k] = pickle.dumps(v)
@@ -225,11 +263,11 @@ def write_obs_to_h5(hf, obs):
 
     hf.flush()
 
-    
+
 class NumpyEncoder(json.JSONEncoder):
 
     def default(self, obj):
-        """If input object is an ndarray it will be converted into a dict 
+        """If input object is an ndarray it will be converted into a dict
         holding dtype, shape and the data, base64 encoded.
         """
         if isinstance(obj, np.ndarray):

@@ -8,7 +8,7 @@ Command line syntax calls the ``prospector.py`` script as an executable and is a
 .. code-block:: shell
 
 		cd demo
-		python prospector.py –param_file=demo_params.py
+		python prospector.py --param_file=demo_params.py
 
 Additional command line options can be given (see below).
 You can copy the ``prospector.py`` script to wherever you intend to run the code, or put it in your path.
@@ -62,7 +62,7 @@ General parameters:
     String.  Base name of the output files.
     Various extensions as well as a time stamp will be appened to this string.
 
-Fitter parameters:
+emcee sampling parameters:
 
 ``"nwalkers"``
     Integer.  Number of emcee walkers.
@@ -79,6 +79,14 @@ Fitter parameters:
 ``"initial_disp"``
     Float.  Default value to use for the dispersion in the parameter
 
+``"interval"``
+   A number between 0 and 1 giving the fractional interval at which to
+   incrementally save the chain to disk.  This can be helpful if there is a
+   possibility that your process might be killed but you don't want to lose all
+   the hard-won sampling that has taken place so far.
+
+optimization parameters:
+    
 ``"do_powell"``
     Boolean.  If ``True``, do a round of Powell minimization before MCMC sampling.
     If MPI is enabled then ``np`` minimizations from different initial conditions will be run,
@@ -91,6 +99,19 @@ Fitter parameters:
 ``"maxfev"``
     Integer.  For the Powell minimization.
 
+Nested sampling parameters:
+
+``"nestle_method"``
+   One of ``"single"``, ``"multi"``, or ``"classic"``.  The method to use in
+   nested sampling.
+
+``"nestle_npoints"``
+   The number of active points in the nested sampling algorithm, defaults to 200
+
+``"nestle_npoints"``
+   The number of active points in the nested sampling algorithm, defaults to 200
+
+   
 Data manipulation parameters:
 
 ``"logify_data"``
@@ -129,7 +150,7 @@ For example
 
 .. code-block:: shell
 
-		python prospector.py –param_file=demo_params.py –nwalkers=128``
+		python prospector.py --param_file=demo_params.py --nwalkers=128
 
 will cause the code to use 128 walkers regardless of the value given directly in the ``run_params`` dictionary.
 Such overriden parameters must be present as keys in the ``run_params`` dictionary,

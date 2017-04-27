@@ -1,5 +1,3 @@
-#!/usr/local/bin/python
-
 import time, sys, os
 import numpy as np
 np.errstate(invalid='ignore')
@@ -66,7 +64,7 @@ def lnprobfn(theta, model=None, obs=None, verbose=run_params['verbose']):
     if obs is None:
         obs = global_obs
 
-    lnp_prior = model.prior_product(theta)
+    lnp_prior = model.prior_product(theta, nested=True)
     if np.isfinite(lnp_prior):
         # Generate mean model
         t1 = time.time()
@@ -98,44 +96,6 @@ def lnprobfn(theta, model=None, obs=None, verbose=run_params['verbose']):
         return -np.infty
 
 
-def chisqfn(theta, model, obs):
-    """Negative of lnprobfn for minimization, and also handles passing in
-    keyword arguments which can only be postional arguments when using scipy
-    minimize.
-    """
-    return -lnprobfn(theta, model=model, obs=obs)
-
-# -----------------
-# MPI pool.  This must be done *after* lnprob and
-# chi2 are defined since slaves will only see up to
-# sys.exit()
-# ------------------
-try:
-    from emcee.utils import MPIPool
-    pool = MPIPool(debug=False, loadbalance=True)
-    if not pool.is_master():
-        # Wait for instructions from the master process.
-        pool.wait()
-        sys.exit(0)
-except(ImportError, ValueError):
-    pool = None
-    print('Not using MPI')
-
-
-def halt(message):
-    """Exit, closing pool safely.
-    """
-    print(message)
-    try:
-        pool.close()
-    except:
-        pass
-    sys.exit(0)
-
-# --------------
-# Master branch
-# --------------
-
 if __name__ == "__main__":
 
     # --------------
@@ -146,13 +106,6 @@ if __name__ == "__main__":
     # Use the globals
     model = global_model
     obsdat = global_obs
-    chi2args = [None, None]
-    postkwargs = {}
-
-    # make zeros into tiny numbers
-    initial_theta = model.rectify_theta(model.initial_theta)
-    if rp.get('debug', False):
-        halt('stopping for debug')
 
     # Try to set up an HDF5 file and write basic info to it
     outroot = "{0}_{1}".format(rp['outfile'], int(time.time()))
@@ -168,60 +121,33 @@ if __name__ == "__main__":
         write_results.write_obs_to_h5(hfile, obsdat)
     except(ImportError):
         hfile = None
-        
-    # -----------------------------------------
-    # Initial guesses using powell minimization
-    # -----------------------------------------
-    if bool(rp.get('do_powell', True)):
-        if rp['verbose']:
-            print('minimizing chi-square...')
-        ts = time.time()
-        powell_opt = {'ftol': rp['ftol'], 'xtol': 1e-6, 'maxfev': rp['maxfev']}
-        powell_guesses, pinit = fitting.pminimize(chisqfn, initial_theta,
-                                                  args=chi2args, model=model,
-                                                  method='powell', opts=powell_opt,
-                                                  pool=pool, nthreads=rp.get('nthreads', 1))
-        best = np.argmin([p.fun for p in powell_guesses])
-        initial_center = fitting.reinitialize(powell_guesses[best].x, model,
-                                              edge_trunc=rp.get('edge_trunc', 0.1))
-        initial_prob = -1 * powell_guesses[best]['fun']
-        pdur = time.time() - ts
-        if rp['verbose']:
-            print('done Powell in {0}s'.format(pdur))
-            print('best Powell guess:{0}'.format(initial_center))
-    else:
-        powell_guesses = None
-        pdur = 0.0
-        initial_center = initial_theta.copy()
-        initial_prob = None
-
+    
     # -------
     # Sample
     # -------
     if rp['verbose']:
-        print('emcee sampling...')
+        print('nestle sampling...')
     tstart = time.time()
-    out = fitting.run_emcee_sampler(lnprobfn, initial_center, model,
-                                    postkwargs=postkwargs, initial_prob=initial_prob,
-                                    pool=pool, hdf5=hfile, **rp)
-    esampler, burn_p0, burn_prob0 = out
-    edur = time.time() - tstart
+    nestleout = fitting.run_nestle_sampler(lnprobfn, model, **rp)
+    dur = time.time() - tstart
     if rp['verbose']:
-        print('done emcee in {0}s'.format(edur))
+        print('done nestle in {0}s'.format(dur))
 
     # -------------------------
     # Output pickles (and HDF5)
     # -------------------------
-    write_results.write_pickles(rp, model, obsdat, esampler, powell_guesses,
-                                outroot=outroot, toptimize=pdur, tsample=edur,
-                                sampling_initial_center=initial_center,
-                                post_burnin_center=burn_p0,
-                                post_burnin_prob=burn_prob0)
+ 
+    # Write the nestle Result object as a pickle  
+    import pickle
+    with open(outroot + '_nmc.pkl', 'w') as f:
+        pickle.dump(nestleout, f)
+    partext = write_results.paramfile_string(**rp)
+    # Write the model as a pickle
+    write_results.write_model_pickle(outroot + '_model', model, powell=None,
+                                     paramfile_text=partext)
+    # Write HDF5
     if hfile is None:
         hfile = hfilename
-    write_results.write_hdf5(hfile, rp, model, obsdat, esampler, powell_guesses,
-                             toptimize=pdur, tsample=edur,
-                             sampling_initial_center=initial_center,
-                             post_burnin_center=burn_p0,
-                             post_burnin_prob=burn_prob0)
+    write_results.write_hdf5(hfile, rp, model, obsdat, nestleout,
+                             None, tsample=dur)
     halt('Finished')

@@ -1,12 +1,17 @@
 import sys
 import numpy as np
 from numpy.random import normal, multivariate_normal
-import emcee
-from . import minimizer
-from ..models.priors import plotting_range
 
-__all__ = ["run_emcee_sampler", "reinitialize_ball", "sampler_ball", "emcee_burn",
-           "pminimize", "minimizer_ball", "reinitialize"]
+try:
+    import emcee
+except(ImportError):
+    pass
+
+from ..models.priors import plotting_range
+from .convergence import convergence_check
+
+__all__ = ["run_emcee_sampler", "reinitialize_ball", "sampler_ball",
+           "emcee_burn"]
 
 
 def run_emcee_sampler(lnprobf, initial_center, model, verbose=True,
@@ -14,6 +19,8 @@ def run_emcee_sampler(lnprobf, initial_center, model, verbose=True,
                       nwalkers=None, nburn=[16], niter=32,
                       walker_factor=4,
                       nthreads=1, pool=None, hdf5=None, interval=1,
+                      convergence_check_interval=None, convergence_chunks=325,
+                      convergence_stable_points_criteria=3,
                       **kwargs):
     """Run an emcee sampler, including iterations of burn-in and re -
     initialization.  Returns the production sampler.
@@ -56,6 +63,18 @@ def run_emcee_sampler(lnprobf, initial_center, model, verbose=True,
     :param interval:
         Fraction of the full run at which to flush to disk, if using hdf5 for
         output.
+
+    :param convergence_check_interval:
+        How often to assess convergence, in number of iterations. If this is
+        set, then the KL convergence test is run.
+
+    :param convergence_chunks:
+        The number of iterations to combine when creating the marginalized
+        parameter probability functions.
+
+    :param convergence_stable_points_criteria:
+        The number of stable convergence checks that the chain must pass before
+        being declared stable.
     """
     # Get dimensions
     ndim = model.ndim
@@ -73,11 +92,25 @@ def run_emcee_sampler(lnprobf, initial_center, model, verbose=True,
                                            prob0=prob0, verbose=verbose, **kwargs)
     # Production run
     esampler.reset()
+
+    conv_crit = convergence_stable_points_criteria
     if hdf5 is not None:
         # Set up hdf5 backend
         sdat = hdf5.create_group('sampling')
-        chain = sdat.create_dataset("chain", (nwalkers, niter, ndim))
-        lnpout = sdat.create_dataset("lnprobability", (nwalkers, niter))
+        nfirstcheck = (2 * convergence_chunks + convergence_check_interval * (conv_crit - 1))
+        if convergence_check_interval is None:  # static dataset
+            chain = sdat.create_dataset("chain", (nwalkers, niter, ndim))
+            lnpout = sdat.create_dataset("lnprobability", (nwalkers, niter))
+        else:  # dynamic dataset
+            chain = sdat.create_dataset('chain', (nwalkers, nfirstcheck, ndim),
+                                        maxshape=(nwalkers, None, ndim))
+            lnpout = sdat.create_dataset('lnprobability', (nwalkers, nfirstcheck),
+                                         maxshape=(nwalkers, None))
+            kl = sdat.create_dataset('kl_divergence', (conv_crit, ndim),
+                                     maxshape=(None, ndim))
+            kl_iter = sdat.create_dataset('kl_iteration', (conv_crit,),
+                                          maxshape=(None,))
+
         # blob = hdf5.create_dataset("blob")
         storechain = False
     else:
@@ -91,6 +124,39 @@ def run_emcee_sampler(lnprobf, initial_center, model, verbose=True,
         if hdf5 is not None:
             chain[:, i, :] = result[0]
             lnpout[:, i] = result[1]
+
+            if (convergence_check_interval is not None) and \
+               (i+1 >= nfirstcheck) and \
+               ((i+1 - nfirstcheck) % convergence_check_interval == 0):
+
+                if verbose:
+                    print('checking convergence after iteration {0}').format(i+1)
+                converge_flag, info = convergence_check(chain,
+                                                        convergence_check_interval=convergence_check_interval,
+                                                        convergence_stable_points_criteria=conv_crit,
+                                                        convergence_chunks=convergence_chunks, **kwargs)
+                kl[:, :] = info['kl_test']
+                kl_iter[:] = info['iteration']
+                hdf5.flush()
+
+                if converge_flag:
+                    if verbose:
+                        print('converged, ending emcee.')
+                    break
+                else:
+                    if verbose:
+                        print('not converged, continuing.')
+                    # if we're going to exit soon, do something fancy
+                    if (i+1 > (niter-convergence_check_interval)):
+                        ngrow = niter - (i + 1)
+                        chain.resize(chain.shape[1]+ngrow, axis=1)
+                        lnpout.resize(lnpout.shape[1]+ngrow, axis=1)
+                    else:  # else extend by convergence_check_interval
+                        chain.resize(chain.shape[1]+convergence_check_interval, axis=1)
+                        lnpout.resize(lnpout.shape[1]+convergence_check_interval, axis=1)
+                        kl.resize(kl.shape[0]+1, axis=0)
+                        kl_iter.resize(kl_iter.shape[0]+1, axis=0)
+
             if (np.mod(i+1, int(interval*niter)) == 0) or (i+1 == niter):
                 # do stuff every once in awhile
                 # this would be the place to put some callback functions
@@ -131,7 +197,7 @@ def emcee_burn(sampler, initial_center, nburn, model=None, prob0=None,
         # Find best walker position
         best = sampler.flatlnprobability.argmax()
         # Is new position better than old position?
-        if sampler.flatlnprobability[best] > prob0:
+        if prob0 is None or sampler.flatlnprobability[best] > prob0:
             prob0 = sampler.flatlnprobability[best]
             initial_center = sampler.flatchain[best, :]
         if k == len(nburn):
@@ -331,90 +397,6 @@ def restart_sampler(sample_results, lnprobf, sps, niter,
                                      threads=nthreads,  pool=pool)
     epos, eprob, state = esampler.run_mcmc(initial, niter, rstate0=state)
     return esampler
-
-
-def pminimize(chi2fn, initial, args=None, model=None,
-              method='powell', opts=None,
-              pool=None, nthreads=1):
-    """Do as many minimizations as you have threads, in parallel.  Always use
-    initial_center for one of the minimization streams, the rest will be
-    sampled from the prior for each parameter.  Returns each of the
-    minimization result dictionaries, as well as the starting positions.
-    """
-    # Instantiate the minimizer
-    mini = minimizer.Pminimize(chi2fn, args, opts,
-                               method=method, pool=pool, nthreads=1)
-    size = mini.size
-    pinitial = minimizer_ball(initial, size, model)
-    powell_guesses = mini.run(pinitial)
-
-    return [powell_guesses, pinitial]
-
-
-def reinitialize(best_guess, model, edge_trunc=0.1, reinit_params=[],
-                 **extras):
-    """Check if the Powell minimization found a minimum close to the edge of
-    the prior for any parameter. If so, reinitialize to the center of the
-    prior.
-
-    This is only done for parameters where ``'reinit':True`` in the model
-    configuration dictionary, or for parameters in the supplied
-    ``reinit_params`` list.
-
-    :param buest_guess:
-        The result of some sort of optimization step, iterable of length
-        model.ndim.
-
-    :param model:
-        A ..models.parameters.ProspectorParams() object.
-
-    :param edge_trunc: (optional, default 0.1)
-        The fractional distance from the edge of the priors that triggers
-        reinitialization.
-
-    :param reinit_params: optional
-        A list of model parameter names to reinitialize, overrides the value or
-        presence of the ``reinit`` key in the model configuration dictionary.
-
-    :returns output:
-        The best_guess with parameters near the edge reset to be at the center
-        of the prior.  ndarray of shape (ndim,)
-    """
-    edge = edge_trunc
-    bounds = model.theta_bounds()
-    output = np.array(best_guess)
-    reinit = np.zeros(model.ndim, dtype=bool)
-    for p, inds in list(model.theta_index.items()):
-        reinit[inds[0]:inds[1]] = (model._config_dict[p].get('reinit', False) or
-                                   (p in reinit_params))
-
-    for k, (guess, bound) in enumerate(zip(best_guess, bounds)):
-        # Normalize the guess and the bounds
-        prange = bound[1] - bound[0]
-        g, b = guess/prange, bound/prange
-        if ((g - b[0] < edge) or (b[1] - g < edge)) and (reinit[k]):
-            output[k] = b[0] + prange/2
-    return output
-
-
-def minimizer_ball(center, nminimizers, model):
-    """Setup a 'grid' of parameter values uniformly distributed between min and
-    max More generally, this should sample from the prior for each parameter.
-    """
-    size = nminimizers
-    pinitial = [center]
-    if size > 1:
-        ginitial = np.zeros([size - 1, model.ndim])
-        for p, v in list(model.theta_index.items()):
-            start, stop = v
-            lo, hi = plotting_range(model._config_dict[p]['prior_args'])
-            if model._config_dict[p]['N'] > 1:
-                ginitial[:, start:stop] = np.array([np.random.uniform(l, h, size - 1)
-                                                    for l, h in zip(lo, hi)]).T
-            else:
-                ginitial[:, start] = np.random.uniform(lo, hi, size - 1)
-        pinitial += ginitial.tolist()
-    return pinitial
 
 
 def run_hmc_sampler(model, sps, lnprobf, initial_center, rp, pool=None):

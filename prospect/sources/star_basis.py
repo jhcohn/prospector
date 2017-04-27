@@ -258,7 +258,7 @@ class StarBasis(object):
             of erg/s/cm^2/Hz/sr.
         """
         if 'logr' in self.params:
-            twologr = 2.* (self.params['logr'] + log_rsun_cgs)
+            twologr = 2. * (self.params['logr'] + log_rsun_cgs)
         elif 'logl' in self.params:
             twologr = ((self.params['logl'] + log_lsun_cgs) -
                        4 * self.params['logt'] - log_SB_cgs - log4pi)
@@ -313,7 +313,7 @@ class StarBasis(object):
     def rescale_params(self, points):
         if self._rescale:
             x = np.atleast_2d(points)
-            x = (x - self.parameter_range[0,:]) / np.diff(self.parameter_range, axis=0)
+            x = (x - self.parameter_range[0, :]) / np.diff(self.parameter_range, axis=0)
             return np.squeeze(x)
         else:
             return points
@@ -322,7 +322,8 @@ class StarBasis(object):
         """Build the kdtree of the model points.
         """
         # slow.  should use a view based method
-        model_points = np.array([list(self._libparams[d]) for d in self.stellar_pars])
+        model_points = np.array([list(self._libparams[d])
+                                 for d in self.stellar_pars])
         self._kdt = KDTree(model_points.T)
 
     def weights_kNN(self, target_points, k=1):
@@ -372,7 +373,7 @@ class BigStarBasis(StarBasis):
 
     def __init__(self, libname='', verbose=False, log_interp=True,
                  n_neighbors=0,  driver=None, in_memory=False,
-                 use_params=None, **kwargs):
+                 use_params=None, strictness=0.0, **kwargs):
         """An object which holds the stellar spectral library, performs
         interpolations of that library, and has methods to return attenuated,
         normalized, smoothed stellar spoectra.
@@ -409,12 +410,19 @@ class BigStarBasis(StarBasis):
             (which must be present in the `_libparams` structure) to build the
             grid and construct spectra.  Otherwise all fields of `_libparams`
             will be used.
+
+        :param strictness: (default: 0.0)
+            Float from 0.0 to 1.0 that gives the fraction of a unit hypercube
+            that is required for a parameter position to be accepted.  That is,
+            if the weights of the enclosing vertices sum to less than this
+            number, raise an error.
         """
         self.verbose = verbose
         self.logarithmic = log_interp
         self._libname = libname
         self.n_neighbors = n_neighbors
         self._in_memory = in_memory
+        self._strictness = strictness
 
         self.load_lib(libname, driver=driver)
         # Do some important bookkeeping
@@ -474,8 +482,8 @@ class BigStarBasis(StarBasis):
     def weights(self, **params):
         inds = self.knearest_inds(**params)
         wghts = self.linear_weights(inds, **params)
-        # if wghts.sum() < 1.0:
-        #     raise ValueError("Something is wrong with the weights")
+        if wghts.sum() <= self._strictness:
+            raise ValueError("Something is wrong with the weights")
         good = wghts > 0
         # if good.sum() < 2**self.ndim:
         #     raise ValueError("Did not find all vertices of the hypercube, "
